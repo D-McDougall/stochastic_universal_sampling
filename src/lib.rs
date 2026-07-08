@@ -36,7 +36,7 @@ where
     assert!(total_weight.is_finite());
     // Generate the random numbers to sample from the weights cumsum.
     let arm_spacing = total_weight / (amount as f64);
-    let arm_offset = rng.gen::<f64>() * arm_spacing;
+    let arm_offset = rng.random::<f64>() * arm_spacing;
     // Find the indices of random numbers in the weights cumsum.
     let mut samples = Vec::with_capacity(amount);
     let mut idx = 0;
@@ -92,7 +92,7 @@ mod tests {
 
     #[test]
     fn no_data() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         assert_data_eq(&mut sus(&mut rng, 0, &[]), &mut []);
         assert_data_eq(&mut sus(&mut rng, 0, &[1.0, 2.0, 3.0]), &mut []);
     }
@@ -100,19 +100,19 @@ mod tests {
     #[test]
     #[should_panic]
     fn no_data_panic() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         sus(&mut rng, 100, &[]);
     }
 
     #[test]
     fn not_enough_data() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         assert_data_eq(&mut sus(&mut rng, 2, &[1.0]), &mut [0, 0]);
     }
 
     #[test]
     fn zero_data() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         assert_data_eq(&mut sus(&mut rng, 1, &[0.0]), &mut [0]);
         assert_data_eq(
             &mut sus(&mut rng, 10, &[0.0; 10]),
@@ -124,14 +124,14 @@ mod tests {
 
     #[test]
     fn round_robin() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         assert_data_eq(&mut sus(&mut rng, 3, &[1.0; 3]), &mut [0, 1, 2]);
         assert_data_eq(&mut sus(&mut rng, 6, &[1.0; 3]), &mut [0, 1, 2, 0, 1, 2]);
     }
 
     #[test]
     fn it_works() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         assert_data_eq(&mut sus(&mut rng, 2, &[1.0, 0.0, 1.0]), &mut [0, 2]);
         assert_data_eq(&mut sus(&mut rng, 3, &[2.0, 0.0, 1.0]), &mut [0, 0, 2]);
         assert_data_eq(&mut sus(&mut rng, 3, &[1.0, 0.0, 0.5]), &mut [0, 0, 2]);
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn sample_one() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut data = [0.0; 10000];
         data[1234] = 0.0000001;
         assert_data_eq(&mut sus(&mut rng, 1, &data), &mut [1234]);
@@ -151,14 +151,14 @@ mod tests {
 
     #[test]
     fn random_data() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         assert!(sus(&mut rng, 1, &[1.0; 10000]) != sus(&mut rng, 1, &[1.0; 10000]));
         assert!(sus(&mut rng, 40, &[1.0; 2000]) != sus(&mut rng, 40, &[1.0; 2000]));
     }
 
     #[test]
     fn random_order() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut a = sus(&mut rng, 2000, &[1.0; 2000]);
         let mut b = sus(&mut rng, 2000, &[1.0; 2000]);
         assert!(a != b);
@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn random_order_repeats() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         for _ in 0..100 {
             let mut a = sus(&mut rng, 100, &[1.0; 2]);
             let mut b = sus(&mut rng, 100, &[1.0; 2]);
@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn uniform_weights() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         let mut a = sus(&mut rng, 13, &[0.3; 13]);
         let mut b = sus(&mut rng, 13, &[0.0; 13]);
@@ -197,11 +197,11 @@ mod tests {
     #[test]
     #[ignore]
     fn benchmark() {
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
+        use rand::RngExt;
+        let mut rng = rand::rng();
         let amount = 1000;
         let num_weights = 1_000_000;
-        let weights: Vec<f64> = (0..num_weights).map(|_| rng.gen()).collect();
+        let weights: Vec<f64> = (0..num_weights).map(|_| rng.random()).collect();
         println!("Running SUS(amount: {amount}, num_weights: {num_weights}) ...",);
         std::thread::yield_now();
         let start_time = std::time::Instant::now();
