@@ -67,7 +67,7 @@ where
     let mut index = 0;
     for arm in 0..amount {
         let arm = (arm as f64) * arm_spacing + arm_offset;
-        while index <= cumulative.len() && cumulative[index] < arm {
+        while index < cumulative.len() - 1 && cumulative[index] <= arm {
             index += 1;
         }
         let original_index = order[index]; // Undo the input order shuffle
@@ -88,7 +88,7 @@ where
 /// being selected. This is equivalent to calling [choose_multiple_weighted()]
 /// with weights that are all equal.
 ///
-/// Returns a vector of indices into the items range.
+/// Returns a vector of indices in the range `(0..items)`.
 ///
 /// # Panics
 ///
@@ -229,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore="performance benchmark"]
+    #[ignore = "performance benchmark"]
     fn benchmark() {
         use rand::RngExt;
         let mut rng = rand::rng();
