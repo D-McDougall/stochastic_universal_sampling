@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+
 use rand::prelude::*;
 
 const NO_DATA: &str = "no data: can not choose from empty set";
@@ -11,6 +13,15 @@ const NO_DATA: &str = "no data: can not choose from empty set";
 /// has an equal likelihood of being selected.
 ///
 /// Returns a vector of indices into the weights array.
+///
+/// # Panics
+///
+/// This function panics in the following cases:
+///
+/// - If `amount > 0` and `weights` is empty (no data to choose from).
+/// - If any element in `weights` is negative (invalid probability).
+/// - If any element in `weights` is not finite (e.g., NaN or infinity).
+///
 pub fn choose_multiple_weighted<R>(rng: &mut R, amount: usize, weights: &[f64]) -> Vec<usize>
 where
     R: Rng + ?Sized,
@@ -29,7 +40,8 @@ where
     order.shuffle(rng);
 
     // Apply a cumulative summation to the weights
-    let cumulative: Vec<_> = order.iter()
+    let cumulative: Vec<_> = order
+        .iter()
         .scan(0.0, |running_total, &original_index| {
             let weight = weights[original_index]; // Access weights in shuffled order
             assert!(weight >= 0.0);
@@ -55,7 +67,7 @@ where
     let mut index = 0;
     for arm in 0..amount {
         let arm = (arm as f64) * arm_spacing + arm_offset;
-        while index < cumulative.len() && cumulative[index] < arm {
+        while index <= cumulative.len() && cumulative[index] < arm {
             index += 1;
         }
         let original_index = order[index]; // Undo the input order shuffle
@@ -77,6 +89,11 @@ where
 /// with weights that are all equal.
 ///
 /// Returns a vector of indices into the items range.
+///
+/// # Panics
+///
+/// This function panics if `amount > 0` and `weights` is empty (no data to choose from).
+///
 pub fn choose_multiple<R>(rng: &mut R, amount: usize, items: usize) -> Vec<usize>
 where
     R: Rng + ?Sized,
@@ -212,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore="performance benchmark"]
     fn benchmark() {
         use rand::RngExt;
         let mut rng = rand::rng();
