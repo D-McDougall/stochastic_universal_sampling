@@ -20,34 +20,51 @@ where
     } else {
         assert!(!weights.is_empty(), "{NO_DATA}");
     }
-    // Apply a cumulative summation to the weights.
-    let weights: Vec<_> = (0..weights.len())
-        .scan(0.0, |sum, idx| {
-            assert!(weights[idx] >= 0.0);
-            *sum += weights[idx];
-            Some(*sum)
+
+    // Shuffle the input locations. The sampling arms are rigidly coupled: one
+    // random number places all of them, so without this, which elements get
+    // picked *together* would depend on the order of the inputs
+    // (e.g. adjacent inputs would be less likely to be picked together).
+    let mut order: Vec<usize> = (0..weights.len()).collect();
+    order.shuffle(rng);
+
+    // Apply a cumulative summation to the weights
+    let cumulative: Vec<_> = order.iter()
+        .scan(0.0, |running_total, &original_index| {
+            let weight = weights[original_index]; // Access weights in shuffled order
+            assert!(weight >= 0.0);
+            *running_total += weight;
+            Some(*running_total)
         })
         .collect();
-    // Check for all zero weights.
-    let total_weight = *weights.last().expect("Internal Error");
+
+    // Check for all zero weights. Can not form PDF with zero total, so fall
+    // back to uniform weight sampling (choose_multiple).
+    let total_weight = *cumulative.last().unwrap(); // Safe to unwrap: already checked for empty input
+    assert!(total_weight.is_finite());
     if total_weight == 0.0 {
         return choose_multiple(rng, amount, weights.len());
     }
-    assert!(total_weight.is_finite());
-    // Generate the random numbers to sample from the weights cumsum.
+
+    // Generate the random number to sample from the weights cumsum
     let arm_spacing = total_weight / (amount as f64);
     let arm_offset = rng.random::<f64>() * arm_spacing;
-    // Find the indices of random numbers in the weights cumsum.
+
+    // Find the indices of random numbers in the weights cumsum
     let mut samples = Vec::with_capacity(amount);
-    let mut idx = 0;
+    let mut index = 0;
     for arm in 0..amount {
         let arm = (arm as f64) * arm_spacing + arm_offset;
-        while idx < weights.len() && weights[idx] < arm {
-            idx += 1;
+        while index < cumulative.len() && cumulative[index] < arm {
+            index += 1;
         }
-        samples.push(idx);
+        let original_index = order[index]; // Undo the input order shuffle
+        samples.push(original_index);
     }
+
     // Shuffle the random sample to break up any runs of repeated elements.
+    // Needed BC: repeated elements will always be adjacent because elements
+    // are chosen via a single scan through the cumulative weights array.
     samples.shuffle(rng);
     samples
 }

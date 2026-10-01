@@ -115,18 +115,3 @@ fn checks_pass_for_shuffled_input_reference() {
     check_pairs_not_locked_to_gap_two(sus_with_shuffled_input);
     check_many_distinct_triples(sus_with_shuffled_input);
 }
-
-/// Documents the exact structure the current implementation exhibits, so the
-/// root cause is visible in a failing diff if this ever changes. This one
-/// PASSES on the current crate and should be deleted once input shuffling is added.
-#[test]
-fn current_behaviour_only_reaches_strided_subsets() {
-    let pairs = distinct_outcomes(sus::<StdRng>, 500, 2, &[1.0; 4]);
-    let expected_pairs: BTreeSet<Vec<usize>> = [vec![0, 2], vec![1, 3]].into_iter().collect();
-    assert_eq!(pairs, expected_pairs);
-
-    let triples = distinct_outcomes(sus::<StdRng>, 2000, 3, &[1.0; 6]);
-    let expected_triples: BTreeSet<Vec<usize>> =
-        [vec![0, 2, 4], vec![1, 3, 5]].into_iter().collect();
-    assert_eq!(triples, expected_triples);
-}
