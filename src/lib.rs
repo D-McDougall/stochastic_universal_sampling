@@ -1,6 +1,6 @@
 use rand::prelude::*;
 
-const NO_DATA: &'static str = "no data: can not choose from empty set";
+const NO_DATA: &str = "no data: can not choose from empty set";
 
 /// The stochastic universal sampling algorithm
 ///
@@ -23,14 +23,14 @@ where
     // Apply a cumulative summation to the weights.
     let weights: Vec<_> = (0..weights.len())
         .scan(0.0, |sum, idx| {
-            debug_assert!(weights[idx] >= 0.0);
+            assert!(weights[idx] >= 0.0);
             *sum += weights[idx];
             Some(*sum)
         })
         .collect();
     // Check for all zero weights.
     let total_weight = *weights.last().expect("Internal Error");
-    if total_weight <= f64::EPSILON * weights.len() as f64 {
+    if total_weight == 0.0 {
         return choose_multiple(rng, amount, weights.len());
     }
     assert!(total_weight.is_finite());
@@ -77,7 +77,7 @@ where
         }
     }
     results.shuffle(rng);
-    return results;
+    results
 }
 
 #[cfg(test)]
@@ -119,7 +119,7 @@ mod tests {
             &mut [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
         );
         assert_data_eq(&mut sus(&mut rng, 6, &[0.0; 3]), &mut [0, 0, 1, 1, 2, 2]);
-        sus(&mut rng, 7, &[0.0; 3]);
+        sus(&mut rng, 7, &[0.0; 3]); // must not crash
     }
 
     #[test]
@@ -152,7 +152,7 @@ mod tests {
     #[test]
     fn random_data() {
         let mut rng = rand::rng();
-        assert!(sus(&mut rng, 1, &[1.0; 10000]) != sus(&mut rng, 1, &[1.0; 10000]));
+        assert!(sus(&mut rng, 13, &[1.0; 10000]) != sus(&mut rng, 13, &[1.0; 10000]));
         assert!(sus(&mut rng, 40, &[1.0; 2000]) != sus(&mut rng, 40, &[1.0; 2000]));
     }
 
