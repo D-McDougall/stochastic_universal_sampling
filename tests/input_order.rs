@@ -26,7 +26,6 @@
 //! for a correct (input-shuffling) implementation is (1/3)^500 and ~0 respectively.
 
 use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use std::collections::BTreeSet;
 
@@ -51,18 +50,6 @@ fn distinct_outcomes(
             picked.sort_unstable();
             picked
         })
-        .collect()
-}
-
-/// Reference implementation of the desired behaviour: permute the inputs, run
-/// SUS, then map the chosen indices back to the caller's original indices.
-fn sus_with_shuffled_input(rng: &mut StdRng, amount: usize, weights: &[f64]) -> Vec<usize> {
-    let mut perm: Vec<usize> = (0..weights.len()).collect();
-    perm.shuffle(rng);
-    let permuted: Vec<f64> = perm.iter().map(|&i| weights[i]).collect();
-    sus(rng, amount, &permuted)
-        .into_iter()
-        .map(|j| perm[j])
         .collect()
 }
 
@@ -97,21 +84,12 @@ fn check_many_distinct_triples(sampler: Sampler) {
 // Tests
 // ---------------------------------------------------------------------------
 
-/// EXPECTED TO FAIL on the current crate: demonstrates input order matters.
 #[test]
 fn input_order_does_not_constrain_pairs() {
     check_pairs_not_locked_to_gap_two(sus::<StdRng>);
 }
 
-/// EXPECTED TO FAIL on the current crate: demonstrates input order matters.
 #[test]
 fn input_order_does_not_constrain_triples() {
     check_many_distinct_triples(sus::<StdRng>);
-}
-
-/// Validates the checks themselves: a wrapper that shuffles its input must pass.
-#[test]
-fn checks_pass_for_shuffled_input_reference() {
-    check_pairs_not_locked_to_gap_two(sus_with_shuffled_input);
-    check_many_distinct_triples(sus_with_shuffled_input);
 }

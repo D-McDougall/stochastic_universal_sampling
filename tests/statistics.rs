@@ -31,10 +31,12 @@
 //! (they sum to k) and are all functions of one random phase, so we use
 //! Bonferroni, which is valid under arbitrary dependence: reject iff
 //! min p < ALPHA / m. With ALPHA = 1e-6 a correct implementation fails for about
-//! one seed in a million; the tests are seeded anyway, hence deterministic.
+//! one seed in a million.
 //!
-//! `checks_have_power_against_known_bad_samplers` proves the checks can actually
-//! reject, by running them against deliberately broken samplers.
+//! The master seed is random on every run (see `seed()`), so that flukes and real
+//! bugs get flushed out over time. Failure messages print the seed; set
+//! `SUS_TEST_SEED=<n>` to replay a run exactly.
+//!
 
 use rand::prelude::*;
 use rand::rngs::StdRng;
@@ -45,9 +47,27 @@ use stochastic_universal_sampling::choose_multiple_weighted as sus;
 
 type Sampler = fn(&mut StdRng, usize, &[f64]) -> Vec<usize>;
 
+/// The master seed for this file.
+///
+/// Every random sample is derived from this seed number. By default it truely
+/// random (OS sourced). To replay a failure, set the environment variable:
+///
+///     SUS_TEST_SEED=123456789 cargo test --test statistics
+///
+/// Failure messages from statistical checks always print the seed.
 fn seed() -> u64 {
     static SEED: OnceLock<u64> = OnceLock::new();
-    *SEED.get_or_init(|| rand::random())
+    *SEED.get_or_init(|| match std::env::var("SUS_TEST_SEED") {
+        Ok(s) => s
+            .parse()
+            .expect("SUS_TEST_SEED must be an unsigned 64-bit integer"),
+        Err(_) => rand::random(),
+    })
+}
+
+/// Suffix appended to failure messages so a failing run can be reproduced.
+fn replay_hint() -> String {
+    format!("[replay with SUS_TEST_SEED={}]", seed())
 }
 
 /// Family-wise significance level, split across tests by Bonferroni.
@@ -55,30 +75,104 @@ const ALPHA: f64 = 1e-6;
 /// Floating-point slack when deciding whether an expectation is an integer.
 const TOL: f64 = 1e-9;
 const TRIALS: usize = 50_000;
-/// The t-test's normal approximation needs this many "events" of variance.
-const MIN_EVENTS: f64 = 10.0;
+/// Minimum number of *expected* "minority events" before the t-test of layer 3
+/// is trusted on an item. See `check_unbiased` for what that means and for why
+/// 1000 (rather than the textbook "10 or so") is the right size when the
+/// significance threshold is as extreme as ours (about 4e-9).
+const MIN_EVENTS: f64 = 1_000.0;
 
 // ===========================================================================
 // Statistics helpers (thin wrappers over statrs)
 // ===========================================================================
+//
+// A 60-second primer on how these tests decide "pass" or "fail"
+// -------------------------------------------------------------
+// The sampler is random, so its output never exactly matches theory, just as
+// 1000 fair coin flips rarely give exactly 500 heads. A statistical test asks:
+//
+//     "If the implementation were CORRECT, how likely is a result at least this
+//      far from the theoretical prediction?"
+//
+// That probability is called a *p-value*. A big p-value (0.3, say) means "totally
+// ordinary, nothing to see". A tiny one (1e-9) means "a correct implementation
+// would practically never do this", so we conclude the implementation is wrong.
+// A p-value is NOT the probability that the code is buggy; it is the probability
+// of the evidence assuming the code is fine.
+//
+// Each helper below turns raw tallies into one p-value, using a different
+// statistical model depending on what is being compared.
 
-/// Exact two-sided binomial test: twice the smaller tail, capped at 1.
-/// Valid for any n and p, including very rare events.
+/// Exact two-sided binomial test.
+///
+/// QUESTION: a coin lands heads with probability `p`. We tossed it `n` times and
+/// saw `x` heads. How surprising is `x`, if the coin really has probability `p`?
+///
+/// HOW: the binomial distribution gives the exact probability of every possible
+/// head-count 0..=n. Two tail probabilities measure surprise:
+///
+///   lower = P(X <= x)   chance of seeing this few heads, or fewer
+///   upper = P(X >= x)   chance of seeing this many heads, or more
+///
+/// Whichever tail is smaller is the one we are surprised by. We double it
+/// because we would be equally suspicious of "too many" and "too few" (that is
+/// what "two-sided" means), and cap at 1 because probabilities cannot exceed 1.
+/// (Doubling the smaller tail is a standard convention; it can overstate the
+/// p-value but never understate it, so it never rejects more often than
+/// advertised.)
 fn binomial_p(x: usize, n: usize, p: f64) -> f64 {
     let b = Binomial::new(p, n as u64).expect("probability in (0, 1)");
-    let lower = b.cdf(x as u64); // P(X <= x)
-    let upper = if x == 0 { 1.0 } else { b.sf(x as u64 - 1) }; // P(X >= x)
+    // P(X <= x). ("cdf" = cumulative distribution function.)
+    let lower = b.cdf(x as u64);
+    // `sf` is the "survival function", 1 - cdf. sf(x - 1) = P(X > x - 1) = P(X >= x).
+    // (When x == 0 there is no x - 1, and P(X >= 0) is trivially 1.)
+    let upper = if x == 0 { 1.0 } else { b.sf(x as u64 - 1) };
     (2.0 * lower.min(upper)).min(1.0)
 }
 
+/// Two-sided p-value for a Student's t statistic with `df` degrees of freedom.
+///
+/// BACKGROUND: a t statistic says "how many standard errors is my sample average
+/// away from the value I expected?" (see `check_unbiased`). If the data are
+/// roughly bell-shaped, t follows Student's t-distribution: a bell curve with
+/// slightly fatter tails than the standard normal, because the spread had to be
+/// *estimated* from the same noisy data. `df` ("degrees of freedom", here the
+/// number of samples minus 1) controls how fat: with ~50 000 samples the curve is
+/// indistinguishable from the standard normal bell curve.
+///
+/// `sf(|t|)` is the area under the curve to the right of |t|, i.e. P(T > |t|).
+/// The bell curve is symmetric, so doubling it also covers the left tail.
 fn t_p(t: f64, df: f64) -> f64 {
     2.0 * StudentsT::new(0.0, 1.0, df).expect("df > 0").sf(t.abs())
 }
 
+/// p-value of a chi-squared statistic: P(a correct model gives a statistic >= `stat`).
+///
+/// `df` (degrees of freedom) is the number of buckets minus 1. Minus one because
+/// the bucket tallies must add up to the known total number of trials, so once
+/// you know all but one bucket, the last is forced: only `buckets - 1` of them
+/// are free to wobble.
+///
+/// Only the upper tail is used: a chi-squared statistic is a sum of squared
+/// misses, so it is small when the fit is good and large when it is bad.
+/// Unusually *small* values (suspiciously perfect fits) are not what we hunt.
 fn chi2_p(stat: f64, df: usize) -> f64 {
     ChiSquared::new(df as f64).expect("df > 0").sf(stat)
 }
 
+/// Pearson's chi-squared statistic, a "goodness of fit" score:
+///
+///     X^2 = sum over buckets of (observed - expected)^2 / expected
+///
+/// In words, for every bucket: measure how far the tally strayed from its
+/// prediction; square that (so overshoot and undershoot both count, and big
+/// misses count extra); divide by the prediction (missing by 10 matters when you
+/// expected 20, but is noise when you expected 20 000); then add everything up.
+/// A good fit scores around `buckets - 1`. A score far above that means the
+/// observed tallies do not look like the prediction.
+///
+/// Caveat: the p-value computed from this score (`chi2_p`) is an approximation
+/// that needs every bucket's expectation to be reasonably large (rule of thumb:
+/// at least 5). That is why rare-event items use `binomial_p` instead.
 fn pearson(observed: &[usize], expected: &[f64]) -> f64 {
     observed
         .iter()
@@ -94,6 +188,19 @@ struct Evidence {
 }
 
 /// Bonferroni decision for a family of tests; prints the smallest p-value.
+///
+/// THE PROBLEM: if you run `m` tests and each has, say, a 1-in-a-million chance
+/// of a false alarm, then across all `m` the chance that at least one cries wolf
+/// is about `m` in a million. It is like buying m lottery tickets: each is a long
+/// shot, but together you win more often. Run 259 tests and your "one in a
+/// million" test becomes "one in four thousand".
+///
+/// THE FIX (Bonferroni correction): demand that each individual p-value beat
+/// `ALPHA / m`. By Boole's inequality (the probability that at least one of
+/// several events happens is at most the SUM of their individual probabilities),
+/// the chance that ANY test false-alarms is then at most m * (ALPHA / m) = ALPHA.
+/// Crucially that inequality needs no independence assumption, which matters
+/// here because the item counts are correlated (they must sum to k).
 fn bonferroni(what: &str, evidence: Vec<Evidence>) -> Result<(), String> {
     let m = evidence.len();
     assert!(m > 0, "{what}: no testable items");
@@ -108,8 +215,10 @@ fn bonferroni(what: &str, evidence: Vec<Evidence>) -> Result<(), String> {
     );
     if worst.p < threshold {
         Err(format!(
-            "{what}: REJECTED at {} with p = {:.3e} < {threshold:.3e} ({m} tests)",
-            worst.label, worst.p
+            "{what}: REJECTED at {} with p = {:.3e} < {threshold:.3e} ({m} tests) {}",
+            worst.label,
+            worst.p,
+            replay_hint()
         ))
     } else {
         Ok(())
@@ -232,6 +341,30 @@ impl Run {
     }
 
     /// Sample mean and unbiased sample variance of an item's count.
+    ///
+    /// We never stored the individual counts, only a histogram: `hist[c]` = how
+    /// many trials produced count `c`. That is all we need, because both numbers
+    /// only depend on two running totals:
+    ///
+    ///     sum    = Σ x         (add up every observed count)
+    ///     sum_sq = Σ x²        (add up the square of every observed count)
+    ///
+    /// A bucket `c` that occurred `n` times contributes `c * n` and `c² * n`.
+    ///
+    ///     mean     = sum / T
+    ///     variance = (sum_sq − T·mean²) / (T − 1)
+    ///
+    /// Variance measures how spread out the counts are: the average squared
+    /// distance from the mean. Dividing by `T − 1` instead of `T` is "Bessel's
+    /// correction": the data were already used once to compute the mean, which
+    /// makes them look slightly tighter around it than the truth, and `T − 1`
+    /// compensates exactly, so that on average this equals the true variance.
+    ///
+    /// Numerical note: "sum_sq − T·mean²" is a textbook trap when the mean is huge
+    /// compared to the spread, because two nearly-equal big floats cancel and
+    /// leave mostly rounding noise. It is safe here: counts are small integers, so
+    /// every intermediate value is an exactly-representable integer (< 2^53), and
+    /// a constant sample gives a variance of exactly 0.0, which callers rely on.
     fn mean_var(&self, item: &Item) -> (f64, f64) {
         let t = self.trials as f64;
         let (sum, sum_sq) = self.hist[item.i]
@@ -302,8 +435,14 @@ fn check_bounds(runs: &[Run]) -> Result<(), String> {
             if bad > 0 {
                 return Err(format!(
                     "[{}] item {}: e = {:.6} so count must be in {{{}, {}}}, \
-                     but {bad} of {} trials fell outside",
-                    r.name, it.i, it.e, it.lo, it.hi, r.trials
+                     but {bad} of {} trials fell outside {}",
+                    r.name,
+                    it.i,
+                    it.e,
+                    it.lo,
+                    it.hi,
+                    r.trials,
+                    replay_hint()
                 ));
             }
         }
@@ -328,20 +467,87 @@ fn check_count_distribution(runs: &[Run]) -> Result<(), String> {
 }
 
 /// Layer 3: E[count] = e, one-sample t-test with the sample standard error.
+///
+/// THE TEST. For one item we observed `T` counts (one per trial). If the sampler
+/// is unbiased their average should land near the expectation `e`. But how near
+/// is "near"? That depends on how noisy the counts are, so we measure the gap in
+/// units of the *standard error*, the typical wobble of an average:
+///
+///     t = (mean − e) / (s / √T)        where s² is the sample variance
+///
+/// Why `s / √T`? The Central Limit Theorem says an average of many independent
+/// draws is approximately bell-curve (normal) distributed around the true mean,
+/// with spread `σ / √T` (σ = spread of a single draw), whatever the shape of the
+/// individual draws. Estimating σ by `s` makes `t` follow Student's t-distribution,
+/// which `t_p` converts into a p-value. A gap of 6 standard errors or more would
+/// occur by pure chance only about once in a billion times.
+///
+/// THE CATCH: "approximately a bell curve" is only true when the data contain
+/// plenty of information about the spread. Consider the "rare events" fixture,
+/// weights [1000, 1000, 0.05], k = 4. Item 0 expects e = 1.99995 copies. SUS gives
+/// it 2 copies in all but one in 20 000 trials, where it gets 1. In T = 50 000
+/// trials we therefore expect only 2.5 such deviations. Poisson statistics
+/// (the law of rare events) say there is an e^−2.5 ≈ 8% chance of seeing NONE.
+/// Then every count is 2, the sample variance is exactly 0, and the t statistic
+/// is 0/0. The previous version of this check treated "no variation, and mean ≠ e"
+/// as proof of bias ("a constant but wrong count is infinitely significant"). But
+/// mean ≠ e (2 vs 1.99995) only because the rare deviations did not happen to
+/// show up, which is the single most likely outcome. That made this test fail on
+/// roughly 1 run in 6 with a correct implementation.
+///
+/// THE RULE. Decide whether an item is testable from the NULL MODEL alone,
+/// before looking at any data (peeking at the data to choose tests voids the
+/// p-value guarantee). The relevant quantity is the expected number
+/// of "minority events": trials in which the item takes its less common
+/// value, floor(e) or ceil(e). With f = frac(e), that is
+///
+///     T · min(f, 1 − f)
+///
+/// If this is below `MIN_EVENTS` we skip the item here; it is still covered by
+/// the exact binomial test of layer 2, which is valid at any rarity.
+///
+/// WHY MIN_EVENTS = 1000 and not the textbook ~10. With only a few hundred
+/// events the bell curve is a poor model for the *extreme* tail we use, because
+/// the same sparse data estimates both the mean and the spread, so a chance
+/// shortfall of events also shrinks the estimated spread and inflates `t`. We
+/// quantified it by enumerating the exact binomial distribution at T = 50 000
+/// and our Bonferroni threshold (~4e-9). The actual false-alarm probability per
+/// item, as a multiple of the intended one:
+///
+///     expected events:   10     100    1 000   10 000
+///     × nominal:         ≫1     ~160     ~4      ~1.1
+///
+/// 1000 keeps the per-item error within a small factor. Nearly all items sit far
+/// above that (thousands of events), so the whole family stays within ~1.2× ALPHA.
+///
+/// ZERO OBSERVED VARIANCE:
+///  * random item that passed the gate: the null model says variation is
+///    near-certain (a variation-free run has probability below e^−1000), so a
+///    constant, wrong mean really is overwhelming evidence of bias.
+///  * deterministic item (e is an integer): SUS must return exactly e every time,
+///    so a constant wrong count is a genuine defect. Any other sampler with
+///    nonzero variance on such an item is simply t-tested (roulette does this).
 fn check_unbiased(runs: &[Run]) -> Result<(), String> {
     let mut evidence = Vec::new();
     for r in runs {
         let t = r.trials as f64;
         for it in r.items() {
+            // Null-model gate (never looks at the data). Integer expectations
+            // are exempt: their count is deterministic, nothing to approximate.
+            let expected_minority_events = t * it.frac().min(1.0 - it.frac());
+            if it.is_random() && expected_minority_events < MIN_EVENTS {
+                continue;
+            }
+
             let (mean, var) = r.mean_var(&it);
             let label = format!("[{}] item {} (e = {:.4})", r.name, it.i, it.e);
             if var <= 1e-12 {
-                // No variation observed: a constant but wrong count is
-                // infinitely significant.
+                // Every trial gave the identical count; the t statistic would
+                // be 0/0, so judge the constant directly (see doc comment).
                 if (mean - it.e).abs() > 1e-6 {
                     evidence.push(Evidence { p: 0.0, label });
                 }
-            } else if var * t >= MIN_EVENTS {
+            } else {
                 let stat = (mean - it.e) / (var / t).sqrt();
                 evidence.push(Evidence {
                     p: t_p(stat, t - 1.0),
@@ -385,13 +591,13 @@ fn check_position_distribution(sampler: Sampler) -> Result<(), String> {
 
 /// Layer 1 on hand-picked fixtures.
 #[test]
-fn counts_are_always_floor_or_ceil_of_expectation() {
+fn stats_counts_are_always_floor_or_ceil_of_expectation() {
     check_bounds(crate_runs()).unwrap();
 }
 
 /// Layer 1 on hundreds of random weight vectors (zeros, wide dynamic range).
 #[test]
-fn random_weight_vectors_obey_floor_ceil_bounds() {
+fn stats_random_weight_vectors_obey_floor_ceil_bounds() {
     let mut rng = StdRng::seed_from_u64(seed() ^ 0xABCD);
     for case in 0..400 {
         let n = 1 + (rng.random::<f64>() * 40.0) as usize;
@@ -415,26 +621,26 @@ fn random_weight_vectors_obey_floor_ceil_bounds() {
 
 /// Layer 2: each item's count is floor(e) + Bernoulli(frac(e)).
 #[test]
-fn count_distribution_is_floor_plus_bernoulli_of_fraction() {
+fn stats_count_distribution_is_floor_plus_bernoulli_of_fraction() {
     check_count_distribution(crate_runs()).unwrap();
 }
 
 /// Layer 3: E[count_i] = k * p_i.
 #[test]
-fn expected_count_is_proportional_to_weight() {
+fn stats_expected_count_is_proportional_to_weight() {
     check_unbiased(crate_runs()).unwrap();
 }
 
 /// Layer 4: the final shuffle makes every output position equally likely to
 /// hold any copy, so position j shows item i with probability p_i.
 #[test]
-fn output_positions_are_proportional_and_exchangeable() {
+fn stats_output_positions_are_proportional_and_exchangeable() {
     check_position_distribution(sus::<StdRng>).unwrap();
 }
 
 /// Selection probabilities must not depend on the absolute scale of the weights.
 #[test]
-fn bounds_hold_at_every_weight_scale() {
+fn stats_bounds_hold_at_every_weight_scale() {
     let bases = [
         fx("ascending", vec![1.0, 2.0, 3.0, 4.0], 7),
         fx("mixed", vec![3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0], 10),
@@ -515,8 +721,10 @@ fn roulette_wheel(rng: &mut StdRng, k: usize, w: &[f64]) -> Vec<usize> {
         .collect()
 }
 
+/// This test proves the checks can actually reject, by running them against
+/// deliberately broken samplers.
 #[test]
-fn checks_have_power_against_known_bad_samplers() {
+fn stats_checks_have_power_against_known_bad_samplers() {
     // Negative control: a correct independent implementation passes everything.
     let runs = run_all(reference_sus, TRIALS);
     check_bounds(&runs).expect("reference SUS must satisfy bounds");
