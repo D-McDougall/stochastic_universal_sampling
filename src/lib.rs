@@ -8,9 +8,17 @@ const NO_DATA: &str = "no data: can not choose from empty set";
 ///
 /// Chooses `amount` elements at random, with repetition, and in random order.
 /// The likelihood of each element’s inclusion in the output is specified by
-/// the `weights` array.  All weights must be greater than or equal to zero. If
-/// all of the weights are equal, even if they are all zero, then each element
-/// has an equal likelihood of being selected.
+/// the `weights` array.  All weights must be finite and greater than or equal
+/// to zero. If all of the weights are equal, even if they are all zero, then
+/// each element has an equal likelihood of being selected.
+///
+/// Each element `i` is returned either `floor(e_i)` or `ceil(e_i)` times, where
+/// `e_i = amount * weights[i] / sum(weights)` is its expected number of copies.
+/// (This is what distinguishes SUS from independent "roulette wheel" draws,
+/// where the number of copies can stray arbitrarily far from `e_i`.)
+///
+/// The input order is randomized internally, so the position of an element in
+/// `weights` has no influence on which elements are chosen *together*.
 ///
 /// Returns a vector of indices into the weights array.
 ///
@@ -26,10 +34,24 @@ pub fn choose_multiple_weighted<R>(rng: &mut R, amount: usize, weights: &[f64]) 
 where
     R: Rng + ?Sized,
 {
+    // Validate the input first so that a bad `weights` array is reported
+    // consistently instead of only when it happens to be used.
+    let mut max_weight: f64 = 0.0;
+    for (i, &w) in weights.iter().enumerate() {
+        assert!(
+            w.is_finite() && w >= 0.0,
+            "invalid weight: weights[{i}] = {w} (must be finite and >= 0)"
+        );
+        max_weight = max_weight.max(w);
+    }
     if amount == 0 {
         return vec![];
     } else {
         assert!(!weights.is_empty(), "{NO_DATA}");
+    }
+    // If every weight is zero then fall back to uniform sampling.
+    if max_weight == 0.0 {
+        return choose_multiple(rng, amount, weights.len());
     }
 
     // Shuffle the input locations. The sampling arms are rigidly coupled: one
@@ -39,23 +61,35 @@ where
     let mut order: Vec<usize> = (0..weights.len()).collect();
     order.shuffle(rng);
 
-    // Apply a cumulative summation to the weights
-    let cumulative: Vec<_> = order
+    // Apply a cumulative summation to the (rescaled) weights, accessed in
+    // shuffled order. Element `order[j]` owns the half-open interval
+    // `[cumulative[j-1], cumulative[j])` of the number line, whose length is
+    // its weight. A pointer landing inside that interval selects the element.
+    // Zero-weight elements own an empty interval and so can never be hit.
+    let cumulative: Vec<f64> = order
         .iter()
         .scan(0.0, |running_total, &original_index| {
-            let weight = weights[original_index]; // Access weights in shuffled order
-            assert!(weight >= 0.0);
-            *running_total += weight;
+            // Rescale so the largest weight is 1.0.
+            //
+            // WHY: floating-point numbers have a limited range. Adding up huge weights
+            // can *overflow* to infinity (f64::MAX + f64::MAX = inf) and dividing a
+            // tiny total by `amount` can *underflow* to zero, in which case every
+            // pointer lands on the same spot and the output is garbage. Dividing every
+            // weight by the largest weight is harmless, because only the *ratios* between
+            // weights matter, but it guarantees that `1.0 <= total <= weights.len()`:
+            // safely away from both cliffs, for any finite input.
+            *running_total += weights[original_index] / max_weight;
             Some(*running_total)
         })
         .collect();
+    let total_weight = *cumulative.last().unwrap(); // Safe to unwrap: `weights` is not empty
+    debug_assert!(total_weight.is_finite() && total_weight >= 1.0);
 
-    // Check for all zero weights. Can not form PDF with zero total, so fall
-    // back to uniform weight sampling (choose_multiple).
-    let total_weight = *cumulative.last().unwrap(); // Safe to unwrap: already checked for empty input
-    assert!(total_weight.is_finite());
-    if total_weight == 0.0 {
-        return choose_multiple(rng, amount, weights.len());
+    // Find the last element that can legitimately be selected. This finds and
+    // discards any zero-weight elements at the end of the shuffled weights array.
+    let mut range_end = cumulative.len();
+    while range_end > 0 && cumulative[range_end - 1] >= total_weight {
+        range_end -= 1;
     }
 
     // Generate the random number to sample from the weights cumsum
@@ -67,7 +101,7 @@ where
     let mut index = 0;
     for arm in 0..amount {
         let arm = (arm as f64) * arm_spacing + arm_offset;
-        while index < cumulative.len() - 1 && cumulative[index] <= arm {
+        while index < range_end && cumulative[index] <= arm {
             index += 1;
         }
         let original_index = order[index]; // Undo the input order shuffle
@@ -92,7 +126,7 @@ where
 ///
 /// # Panics
 ///
-/// This function panics if `amount > 0` and `weights` is empty (no data to choose from).
+/// This function panics if `amount > 0` and `items == 0` (no data to choose from).
 ///
 pub fn choose_multiple<R>(rng: &mut R, amount: usize, items: usize) -> Vec<usize>
 where

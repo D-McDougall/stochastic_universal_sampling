@@ -10,14 +10,11 @@
     license      = "MIT-0"
     repository   = "https://github.com/D-McDougall/stochastic_universal_sampling.git"
 
-[lib]
-    doctest = false
-
 [dependencies]
     rand = "0.10"
 
 [dev-dependencies]
-    statrs = "0.18"
+    statrs = "0.19"
 
 [profile.test]
     opt-level = 1

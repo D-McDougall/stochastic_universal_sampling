@@ -49,7 +49,7 @@ type Sampler = fn(&mut StdRng, usize, &[f64]) -> Vec<usize>;
 
 /// The master seed for this file.
 ///
-/// Every random sample is derived from this seed number. By default it truely
+/// Every random sample is derived from this seed number. By default it truly
 /// random (OS sourced). To replay a failure, set the environment variable:
 ///
 ///     SUS_TEST_SEED=123456789 cargo test --test statistics
@@ -362,9 +362,10 @@ impl Run {
     ///
     /// Numerical note: "sum_sq − T·mean²" is a textbook trap when the mean is huge
     /// compared to the spread, because two nearly-equal big floats cancel and
-    /// leave mostly rounding noise. It is safe here: counts are small integers, so
-    /// every intermediate value is an exactly-representable integer (< 2^53), and
-    /// a constant sample gives a variance of exactly 0.0, which callers rely on.
+    /// leave mostly rounding noise. It is harmless here: counts are small
+    /// integers, so `sum` and `sum_sq` are exactly-representable integers
+    /// (< 2^53), and the cancellation costs only about 1e-10 of relative
+    /// accuracy, far below the statistical noise of the test.
     fn mean_var(&self, item: &Item) -> (f64, f64) {
         let t = self.trials as f64;
         let (sum, sum_sq) = self.hist[item.i]
@@ -378,7 +379,7 @@ impl Run {
     }
 }
 
-/// Calculates what the histgram should look like
+/// Calculates what the histogram should look like
 fn expected_counts(weights: &[f64], k: usize) -> Vec<f64> {
     let total: f64 = weights.iter().sum();
     weights.iter().map(|&w| k as f64 * w / total).collect()
@@ -413,7 +414,7 @@ fn run_all(sampler: Sampler, trials: usize) -> Vec<Run> {
     fixtures()
         .iter()
         .enumerate()
-        .map(|(i, f)| run_fixture(sampler, f, trials, seed() + i as u64))
+        .map(|(i, f)| run_fixture(sampler, f, trials, seed().wrapping_add(i as u64)))
         .collect()
 }
 
@@ -615,7 +616,13 @@ fn stats_random_weight_vectors_obey_floor_ceil_bounds() {
             w[0] = 1.0;
         }
         let f = fx(&format!("random case {case} (n={n}, k={k})"), w, k);
-        check_bounds(&[run_fixture(sus::<StdRng>, &f, 200, seed() + case)]).unwrap();
+        check_bounds(&[run_fixture(
+            sus::<StdRng>,
+            &f,
+            200,
+            seed().wrapping_add(case),
+        )])
+        .unwrap();
     }
 }
 
